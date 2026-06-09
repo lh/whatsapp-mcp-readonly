@@ -28,7 +28,6 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"google.golang.org/protobuf/proto"
 )
 
 // Message represents a chat message for our client
@@ -187,188 +186,6 @@ func extractTextContent(msg *waProto.Message) string {
 
 	// For now, we're ignoring non-text messages
 	return ""
-}
-
-// SendMessageResponse represents the response for the send message API
-type SendMessageResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-}
-
-// SendMessageRequest represents the request body for the send message API
-type SendMessageRequest struct {
-	Recipient string `json:"recipient"`
-	Message   string `json:"message"`
-	MediaPath string `json:"media_path,omitempty"`
-}
-
-// Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
-	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
-	}
-
-	// Create JID for recipient
-	var recipientJID types.JID
-	var err error
-
-	// Check if recipient is a JID
-	isJID := strings.Contains(recipient, "@")
-
-	if isJID {
-		// Parse the JID string
-		recipientJID, err = types.ParseJID(recipient)
-		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
-		}
-	} else {
-		// Create JID from phone number
-		recipientJID = types.JID{
-			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
-		}
-	}
-
-	msg := &waProto.Message{}
-
-	// Check if we have media to send
-	if mediaPath != "" {
-		// Read media file
-		mediaData, err := os.ReadFile(mediaPath)
-		if err != nil {
-			return false, fmt.Sprintf("Error reading media file: %v", err)
-		}
-
-		// Determine media type and mime type based on file extension
-		fileExt := strings.ToLower(mediaPath[strings.LastIndex(mediaPath, ".")+1:])
-		var mediaType whatsmeow.MediaType
-		var mimeType string
-
-		// Handle different media types
-		switch fileExt {
-		// Image types
-		case "jpg", "jpeg":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/jpeg"
-		case "png":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/png"
-		case "gif":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/gif"
-		case "webp":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/webp"
-
-		// Audio types
-		case "ogg":
-			mediaType = whatsmeow.MediaAudio
-			mimeType = "audio/ogg; codecs=opus"
-
-		// Video types
-		case "mp4":
-			mediaType = whatsmeow.MediaVideo
-			mimeType = "video/mp4"
-		case "avi":
-			mediaType = whatsmeow.MediaVideo
-			mimeType = "video/avi"
-		case "mov":
-			mediaType = whatsmeow.MediaVideo
-			mimeType = "video/quicktime"
-
-		// Document types (for any other file type)
-		default:
-			mediaType = whatsmeow.MediaDocument
-			mimeType = "application/octet-stream"
-		}
-
-		// Upload media to WhatsApp servers
-		resp, err := client.Upload(context.Background(), mediaData, mediaType)
-		if err != nil {
-			return false, fmt.Sprintf("Error uploading media: %v", err)
-		}
-
-		fmt.Println("Media uploaded", resp)
-
-		// Create the appropriate message type based on media type
-		switch mediaType {
-		case whatsmeow.MediaImage:
-			msg.ImageMessage = &waProto.ImageMessage{
-				Caption:       proto.String(message),
-				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
-			}
-		case whatsmeow.MediaAudio:
-			// Handle ogg audio files
-			var seconds uint32 = 30 // Default fallback
-			var waveform []byte = nil
-
-			// Try to analyze the ogg file
-			if strings.Contains(mimeType, "ogg") {
-				analyzedSeconds, analyzedWaveform, err := analyzeOggOpus(mediaData)
-				if err == nil {
-					seconds = analyzedSeconds
-					waveform = analyzedWaveform
-				} else {
-					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err)
-				}
-			} else {
-				fmt.Printf("Not an Ogg Opus file: %s\n", mimeType)
-			}
-
-			msg.AudioMessage = &waProto.AudioMessage{
-				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
-				Seconds:       proto.Uint32(seconds),
-				PTT:           proto.Bool(true),
-				Waveform:      waveform,
-			}
-		case whatsmeow.MediaVideo:
-			msg.VideoMessage = &waProto.VideoMessage{
-				Caption:       proto.String(message),
-				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
-			}
-		case whatsmeow.MediaDocument:
-			msg.DocumentMessage = &waProto.DocumentMessage{
-				Title:         proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
-				Caption:       proto.String(message),
-				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
-			}
-		}
-	} else {
-		msg.Conversation = proto.String(message)
-	}
-
-	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
-
-	if err != nil {
-		return false, fmt.Sprintf("Error sending message: %v", err)
-	}
-
-	return true, fmt.Sprintf("Message sent to %s", recipient)
 }
 
 // Extract media info from a message
@@ -678,50 +495,6 @@ func extractDirectPathFromURL(url string) string {
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	// Handler for sending messages
-	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
-		// Only allow POST requests
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Parse the request body
-		var req SendMessageRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request format", http.StatusBadRequest)
-			return
-		}
-
-		// Validate request
-		if req.Recipient == "" {
-			http.Error(w, "Recipient is required", http.StatusBadRequest)
-			return
-		}
-
-		if req.Message == "" && req.MediaPath == "" {
-			http.Error(w, "Message or media path is required", http.StatusBadRequest)
-			return
-		}
-
-		fmt.Println("Received request to send message", req.Message, req.MediaPath)
-
-		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
-		fmt.Println("Message sent", success, message)
-		// Set response headers
-		w.Header().Set("Content-Type", "application/json")
-
-		// Set appropriate status code
-		if !success {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-
-		// Send response
-		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
-		})
-	})
 
 	// Handler for downloading media
 	http.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
@@ -774,8 +547,9 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
-	// Start the server
-	serverAddr := fmt.Sprintf(":%d", port)
+	// Start the server. Bind loopback only: the bridge's HTTP API must not be
+	// reachable from the LAN (air-gap defense-in-depth; send path already removed).
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Run server in a goroutine so it doesn't block
